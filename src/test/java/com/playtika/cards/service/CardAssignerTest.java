@@ -1,9 +1,6 @@
 package com.playtika.cards.service;
 
-import com.playtika.cards.domain.Album;
-import com.playtika.cards.domain.AlbumSet;
-import com.playtika.cards.domain.Card;
-import com.playtika.cards.domain.Event;
+import com.playtika.cards.domain.*;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -14,8 +11,8 @@ import java.util.Collection;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
-import static com.google.common.collect.Lists.newArrayList;
 import static com.google.common.collect.Sets.newHashSet;
 import static com.playtika.cards.domain.Event.Type.ALBUM_FINISHED;
 import static com.playtika.cards.domain.Event.Type.SET_FINISHED;
@@ -23,7 +20,7 @@ import static java.util.concurrent.Executors.newFixedThreadPool;
 import static java.util.stream.Collectors.toList;
 import static java.util.stream.LongStream.range;
 import static org.apache.commons.lang3.RandomUtils.nextInt;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 /**
  * Created by rostyslavs on 11/21/2015.
@@ -37,8 +34,6 @@ public class CardAssignerTest {
     private final List<Long> users = range(0L, 10L).boxed()
             .collect(toList());
 
-    private CardAssigner cardAssigner = new DefaultCardAssigner();
-
     @Before
     public void configure() {
         when(configurationProvider.get()).thenReturn(new Album(1L, "Animals", newHashSet(
@@ -47,23 +42,39 @@ public class CardAssignerTest {
         )));
     }
 
-    @Test(timeout = 20000L)
-    public void assigningCardsToUsers() {
-        final List<Event> events = new CopyOnWriteArrayList<>();
-        cardAssigner.subscribe(events::add);
+    private final static int REPETITIONS = 10000;
 
-        Album album = configurationProvider.get();
-        ExecutorService executorService = newFixedThreadPool(10);
-        final List<Card> allCards = album.sets.stream().map(set -> set.cards).flatMap(Collection::stream).collect(toList());
-        while (!albumsFinished(events, album)) {
-            executorService.submit(() -> {
-                Card card = allCards.get(nextInt(0, allCards.size()));
-                Long userId = users.get(nextInt(0, users.size()));
-                cardAssigner.assignCard(userId, card.id);
-            });
+    @Test(timeout = 60000L)
+    public void assigningCardsToUsers() throws InterruptedException {
+        int rep = 0;
+        List<Event> events = new CopyOnWriteArrayList<>();
+
+        while (rep++ < REPETITIONS) {
+            final ExecutorService executorService = newFixedThreadPool(10);
+            final CardAssigner cardAssigner = new DefaultCardAssigner(configurationProvider);
+            final Album album = configurationProvider.get();
+            final List<Card> allCards = album.sets.stream().map(set -> set.cards).flatMap(Collection::stream).collect(toList());
+            events.clear();
+            cardAssigner.subscribe(events::add);
+            System.out.print("Repetition " + rep);
+
+            int i = 0;
+            while (!albumsFinished(events, album)) {
+                i++;
+                executorService.submit(() -> {
+                    Card card = allCards.get(nextInt(0, allCards.size()));
+                    Long userId = users.get(nextInt(0, users.size()));
+                    cardAssigner.assignCard(userId, card.id);
+                });
+            }
+            System.out.println(", " + i);
+            executorService.shutdown();
+            executorService.awaitTermination(1000, TimeUnit.SECONDS);
+            long countAlbums = events.stream().filter(event -> event.type == ALBUM_FINISHED).count();
+            long countSets = events.stream().filter(event -> event.type == SET_FINISHED).count();
+            assert countAlbums == users.size() : "Album Events count is wrong " + countAlbums;
+            assert countSets == users.size() * album.sets.size(): "AlbumSet Events count is wrong " + countSets;
         }
-        assert events.stream().filter(event -> event.type == ALBUM_FINISHED).count() == users.size();
-        assert events.stream().filter(event -> event.type == SET_FINISHED).count() == users.size() * album.sets.size();
     }
 
     private boolean albumsFinished(List<Event> events, Album album) {
